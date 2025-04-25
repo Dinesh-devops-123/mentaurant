@@ -1,0 +1,82 @@
+pipeline {
+    agent { label 'master' }
+
+    environment {
+        PROJECT_DIR = 'Revolite-api'
+    }
+
+    stages {
+        stage('Prepare Workspace') {
+            steps {
+                sh 'rm -rf ${WORKSPACE}/*@tmp*'
+                cleanWs()
+            }
+        }
+
+        stage('Cloning') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(credentialsId: 'Azure-Git-Credentials', usernameVariable: 'Git_User', passwordVariable: 'Git_Pass')]) {
+                        echo "Cloning repository from Azure DevOps"
+                        sh """
+                            sudo rm -rf ${PROJECT_DIR}
+                            git clone --branch Development https://${Git_User}:${Git_Pass}@dev.azure.com/revolite/Internal/_git/revolite-site-api ${PROJECT_DIR}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage("Installing Dependencies") {
+            steps {
+                dir("${env.PROJECT_DIR}") {
+                    sh 'npm install --force'
+                }
+            }
+        }
+
+        stage("Building process") {
+            steps {
+                dir("${env.PROJECT_DIR}") {
+                    sh 'npm run build --verbose'
+                }
+            }
+        }
+
+        stage("Transferring Build Files to Windows Slave") {
+            steps {
+                sh """
+                    if [ -d /mnt/dev-api/${PROJECT_DIR} ]; then
+                        sudo rm -rf /mnt/dev-api/${PROJECT_DIR}
+                    fi
+                    mkdir -p /mnt/dev-web/${PROJECT_DIR}
+                    cp -r ${env.WORKSPACE}/${PROJECT_DIR}/dist /mnt/dev-web/${PROJECT_DIR}/
+                """
+            }
+        }
+
+        stage("Running on Slave") {
+            agent { label 'Dev-Web' }
+            steps {
+                sh """
+                    cd /mnt/projects/${PROJECT_DIR}
+                    if pm2 list | grep -q "${PROJECT_DIR}"; then
+                        echo "PM2 process '${PROJECT_DIR}' exists. Deleting..."
+                        pm2 delete ${PROJECT_DIR}
+                    fi
+                    pm2 start npm --name "${PROJECT_DIR}" -- start
+                """
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Deployment successful"
+            cleanWs()
+        }
+        failure {
+            echo "Deployment failed, please check the logs."
+        }
+    }
+}
